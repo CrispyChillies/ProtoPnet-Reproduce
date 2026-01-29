@@ -7,7 +7,7 @@ add_on_layers_type = 'regular'
 
 experiment_run = '003'
 
-data_path = '/kaggle/input/protopnet/datasets/cub200_cropped/'
+data_path = '/kaggle/input/proto-p-net-competition/cub200_cropped/'
 train_dir = '/kaggle/working/' + 'train_cropped_mini_augmented/'
 test_dir = data_path + 'test_cropped_mini/'
 train_push_dir = data_path + 'train_cropped_mini/'
