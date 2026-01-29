@@ -187,7 +187,7 @@ for epoch in range(num_train_epochs):
                 accu = tnt.test(model=ppnet_multi, dataloader=test_loader,
                                 class_specific=class_specific, log=log)
                 save.save_model_w_condition(model=ppnet, model_dir=model_dir, model_name=str(epoch) + '_' + str(i) + 'push', accu=accu,
-                                            target_accu=0.70, log=log)
+                                            target_accu=0.2, log=log)
    
 logclose()
 
