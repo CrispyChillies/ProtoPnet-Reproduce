@@ -58,7 +58,9 @@ load_model_name = args.model[0] #'10_18push0.7822.pth'
 model_base_architecture = load_model_dir.split('/')[2]
 experiment_run = '/'.join(load_model_dir.split('/')[3:])
 
-save_analysis_path = os.path.join(test_image_dir, model_base_architecture,
+# Save to /kaggle/working instead of read-only input directory
+save_analysis_path = os.path.join('/kaggle/working', 'local_analysis', 
+                                  model_base_architecture,
                                   experiment_run, load_model_name)
 makedir(save_analysis_path)
 
