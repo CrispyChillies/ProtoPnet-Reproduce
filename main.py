@@ -1,4 +1,8 @@
 import os
+import sys
+# Ensure local modules are imported first
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
 import shutil
 
 import torch
