@@ -253,7 +253,9 @@ def update_prototypes_on_batch(search_batch_input,
             proto_rf_boxes[j, 3] = rf_prototype_j[3]
             proto_rf_boxes[j, 4] = rf_prototype_j[4]
             if proto_rf_boxes.shape[1] == 6 and search_y is not None:
-                proto_rf_boxes[j, 5] = search_y[rf_prototype_j[0]].item()
+                # For multi-label, store the target class of this prototype
+                target_class = torch.argmax(prototype_network_parallel.module.prototype_class_identity[j]).item()
+                proto_rf_boxes[j, 5] = target_class
 
             # find the highly activated region of the original image
             proto_dist_img_j = proto_dist_[img_index_in_batch, j, :, :]
