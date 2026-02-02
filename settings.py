@@ -28,7 +28,8 @@ joint_lr_step_size = 10
 
 warm_optimizer_lrs = {'add_on_layers': 3e-4,
                       'prototype_vectors': 3e-4,
-                      'occurrence_module': 3e-4}
+                      'occurrence_module': 3e-4, 
+                      'last_layer': 1e-4}
 
 last_layer_optimizer_lr = 1e-4
 
