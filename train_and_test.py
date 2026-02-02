@@ -23,7 +23,7 @@ def _train_or_test(model, dataloader, optimizer=None, class_specific=True, use_l
     total_occurrence_loss = 0
     
     # Multi-label classification loss
-    bce_loss = torch.nn.BCEWithLogitsLoss()
+    bce_loss = torch.nn.BCEWithLogitsLoss(pos_weight=weights)
 
     for i, (image, label) in enumerate(dataloader):
         input = image.cuda()
