@@ -177,8 +177,8 @@ from settings import coefs
 # number of training epochs, number of warm epochs, push start epoch, push epochs
 from settings import num_train_epochs, num_warm_epochs, push_start, push_epochs
 
-ppnet.module.last_layer.weight.requires_grad = True
-ppnet.module.last_layer.bias.requires_grad = True # Nếu có bias
+ppnet.modules.last_layer.weight.requires_grad = True
+ppnet.modules.last_layer.bias.requires_grad = True # Nếu có bias
 
 # train the model
 log('start training')
