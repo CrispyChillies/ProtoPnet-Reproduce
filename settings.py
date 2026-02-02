@@ -40,8 +40,9 @@ coefs = {
     'occur': 0.01,    # Occurrence regularization
 }
 
-num_train_epochs = 50
-num_warm_epochs = 5
+num_train_epochs = 5
+num_warm_epochs = 1
 
-push_start = 10
-push_epochs = [i for i in range(num_train_epochs) if i % 5 == 0]  # Push every 5 epochs
+push_start = 1
+# push_epochs = [i for i in range(num_train_epochs) if i % 5 == 0]  # Push every 5 epochs
+push_epochs = [2,4]

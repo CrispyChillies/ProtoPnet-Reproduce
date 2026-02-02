@@ -159,6 +159,7 @@ from settings import warm_optimizer_lrs
 warm_optimizer_specs = \
 [{'params': ppnet.add_on_layers.parameters(), 'lr': warm_optimizer_lrs['add_on_layers'], 'weight_decay': 1e-3},
  {'params': ppnet.prototype_vectors, 'lr': warm_optimizer_lrs['prototype_vectors']},
+ {'params': ppnet.last_layer.parameters(), 'lr': warm_optimizer_lrs['last_layer']}
 ]
 if hasattr(ppnet, 'occurrence_module'):
     warm_optimizer_specs.append(
@@ -175,6 +176,9 @@ from settings import coefs
 
 # number of training epochs, number of warm epochs, push start epoch, push epochs
 from settings import num_train_epochs, num_warm_epochs, push_start, push_epochs
+
+ppnet.module.last_layer.weight.requires_grad = True
+ppnet.module.last_layer.bias.requires_grad = True # Nếu có bias
 
 # train the model
 log('start training')
