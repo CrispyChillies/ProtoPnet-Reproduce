@@ -15,21 +15,20 @@ class NIHDataset(torch.utils.data.Dataset):
     
     # 14 disease labels in NIH ChestX-ray14 dataset
     LABELS = [
-        'Atelectasis',
-        'Cardiomegaly',
-        'Effusion',
-        'Infiltration',
-        'Mass',
-        'Nodule',
-        'Pneumonia',
-        'Pneumothorax',
-        'Consolidation',
-        'Edema',
-        'Emphysema',
-        'Fibrosis',
-        'Pleural_Thickening',
-        'Hernia'
-    ]
+        'Atelectasis', 
+        'Cardiomegaly', 
+        'Consolidation', 
+        'Edema', 
+        'Effusion', 
+        'Emphysema', 
+        'Fibrosis', 
+        'Hernia', 
+        'Infiltration', 
+        'Mass', 
+        'Nodule', 
+        'Pleural_Thickening', 
+        'Pneumonia', 
+        'Pneumothorax']
     
     def __init__(self, csv_file, root_dir, transform=None, indices=None):
         """

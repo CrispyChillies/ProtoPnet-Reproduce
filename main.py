@@ -131,7 +131,7 @@ log('batch size: {0}'.format(train_batch_size))
 ppnet = model.construct_PPNet(base_architecture=base_architecture,
                               pretrained=True, img_size=img_size,
                               prototype_shape=prototype_shape,
-                              num_classes=num_classes,
+                              num_classes=num_classes,  
                               prototype_activation_function=prototype_activation_function,
                               add_on_layers_type=add_on_layers_type)
 #if prototype_activation_function == 'linear':
