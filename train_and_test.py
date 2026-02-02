@@ -110,11 +110,10 @@ def _train_or_test(model, dataloader, optimizer=None, class_specific=True, use_l
             # evaluation statistics - Multi-label accuracy
             # Use threshold of 0.5 for multi-label prediction
             predicted = (torch.sigmoid(output.data) > 0.5).float()
-            n_examples += target.size(0)
-
-            # Exact match accuracy (all labels must match)
+            
+            # Element-wise accuracy (percentage of correct label predictions)
             n_correct += (predicted == target).sum().item() 
-            n_examples += target.numel() # Tổng số phần tử (batch_size * num_classes)
+            n_examples += target.numel()  # Total number of elements (batch_size * num_classes)
 
             n_batches += 1
             total_cross_entropy += cross_entropy.item()
