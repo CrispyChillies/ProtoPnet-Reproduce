@@ -28,7 +28,7 @@ def _train_or_test(model, dataloader, optimizer=None, class_specific=True, use_l
         7.4193, 43.5628, 65.5006, 492.9207,
         4.6359, 18.3912, 16.7097, 32.1226,
         77.3508, 20.1467
-    ])
+    ]).cuda()
 
     bce_loss = torch.nn.BCEWithLogitsLoss(pos_weight=pos_weight)
 
