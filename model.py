@@ -113,6 +113,14 @@ class PPNet(nn.Module):
         self.last_layer = nn.Linear(self.num_prototypes, self.num_classes,
                                     bias=False) # do not use bias
 
+        # Occurrence module for weighted pooling
+        self.occurrence_module = nn.Sequential(
+            nn.Conv2d(in_channels=self.prototype_shape[1], out_channels=self.prototype_shape[1], kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=self.prototype_shape[1], out_channels=self.num_prototypes, kernel_size=1),
+            nn.Sigmoid()  # Map values to [0, 1] for occurrence probability
+        )
+
         if init_weights:
             self._initialize_weights()
 
@@ -187,19 +195,37 @@ class PPNet(nn.Module):
             return self.prototype_activation_function(distances)
 
     def forward(self, x):
-        distances = self.prototype_distances(x)
-        '''
-        we cannot refactor the lines below for similarity scores
-        because we need to return min_distances
-        '''
-        # global min pooling
-        min_distances = -F.max_pool2d(-distances,
-                                      kernel_size=(distances.size()[2],
-                                                   distances.size()[3]))
-        min_distances = min_distances.view(-1, self.num_prototypes)
+        # 1. Extract features through backbone and add-on layers
+        conv_features = self.conv_features(x)  # (Batch, C, H, W)
+        
+        # 2. Generate occurrence maps for each prototype
+        occurrence_map = self.occurrence_module(conv_features)  # (Batch, Num_Proto, H, W)
+        
+        # 3. Compute L2 distances between features and prototypes
+        distances = self._l2_convolution(conv_features)  # (Batch, Num_Proto, H', W')
+        
+        # 4. Weighted pooling using occurrence maps
+        # Occurrence map acts as attention weights for spatial locations
+        # Resize occurrence_map to match distances spatial dimensions if needed
+        if occurrence_map.shape[2:] != distances.shape[2:]:
+            occurrence_map = F.interpolate(occurrence_map, size=distances.shape[2:], 
+                                          mode='bilinear', align_corners=False)
+        
+        # Apply weighted pooling: aggregate distances weighted by occurrence
+        # Higher occurrence = more important for that location
+        weighted_distances = distances * (1 - occurrence_map)  # Lower distance where occurrence is high
+        
+        # Global pooling: use weighted average instead of max pooling
+        min_distances = torch.sum(weighted_distances * occurrence_map, dim=(2, 3)) / \
+                       (torch.sum(occurrence_map, dim=(2, 3)) + self.epsilon)
+        
+        # 5. Convert distances to similarity scores
         prototype_activations = self.distance_2_similarity(min_distances)
+        
+        # 6. Final classification layer
         logits = self.last_layer(prototype_activations)
-        return logits, min_distances
+        
+        return logits, min_distances, occurrence_map
 
     def push_forward(self, x):
         '''this method is needed for the pushing operation'''

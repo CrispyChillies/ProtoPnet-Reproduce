@@ -15,6 +15,7 @@ import argparse
 import re
 
 from helpers import makedir
+from dataset import NIHDataset  # Import NIHDataset
 import model
 import push
 import prune
@@ -52,45 +53,73 @@ prototype_self_act_filename_prefix = 'prototype-self-act'
 proto_bound_boxes_filename_prefix = 'bb'
 
 # load the data
-from settings import train_dir, test_dir, train_push_dir, \
-                     train_batch_size, test_batch_size, train_push_batch_size
+from settings import data_path, csv_file, train_batch_size, test_batch_size, train_push_batch_size, test_split, val_split
 
-normalize = transforms.Normalize(mean=mean,
-                                 std=std)
+# Create train/val/test splits based on patient IDs
+log('Creating train/val/test splits...')
+train_indices, val_indices, test_indices = NIHDataset.create_train_test_split(
+    csv_file, test_size=test_split, val_size=val_split, random_state=42
+)
 
-# all datasets
-# train set
-train_dataset = datasets.ImageFolder(
-    train_dir,
-    transforms.Compose([
-        transforms.Resize(size=(img_size, img_size)),
-        transforms.ToTensor(),
-        normalize,
-    ]))
+normalize = transforms.Normalize(mean=mean, std=std)
+
+# Training transforms with augmentation
+train_transform = transforms.Compose([
+    transforms.Resize(size=(img_size, img_size)),
+    transforms.RandomHorizontalFlip(p=0.5),
+    transforms.RandomRotation(degrees=10),
+    transforms.ColorJitter(brightness=0.2, contrast=0.2),
+    transforms.ToTensor(),
+    normalize,
+])
+
+# Test transforms without augmentation
+test_transform = transforms.Compose([
+    transforms.Resize(size=(img_size, img_size)),
+    transforms.ToTensor(),
+    normalize,
+])
+
+# Push transforms without normalization (needed for visualization)
+push_transform = transforms.Compose([
+    transforms.Resize(size=(img_size, img_size)),
+    transforms.ToTensor(),
+])
+
+# Create datasets
+train_dataset = NIHDataset(
+    csv_file=csv_file,
+    root_dir=data_path,
+    transform=train_transform,
+    indices=train_indices
+)
+
+train_push_dataset = NIHDataset(
+    csv_file=csv_file,
+    root_dir=data_path,
+    transform=push_transform,
+    indices=train_indices  # Use training data for push
+)
+
+test_dataset = NIHDataset(
+    csv_file=csv_file,
+    root_dir=data_path,
+    transform=test_transform,
+    indices=test_indices
+)
+
+# Create data loaders
 train_loader = torch.utils.data.DataLoader(
     train_dataset, batch_size=train_batch_size, shuffle=True,
-    num_workers=4, pin_memory=False)
-# push set
-train_push_dataset = datasets.ImageFolder(
-    train_push_dir,
-    transforms.Compose([
-        transforms.Resize(size=(img_size, img_size)),
-        transforms.ToTensor(),
-    ]))
+    num_workers=4, pin_memory=True)
+
 train_push_loader = torch.utils.data.DataLoader(
     train_push_dataset, batch_size=train_push_batch_size, shuffle=False,
-    num_workers=4, pin_memory=False)
-# test set
-test_dataset = datasets.ImageFolder(
-    test_dir,
-    transforms.Compose([
-        transforms.Resize(size=(img_size, img_size)),
-        transforms.ToTensor(),
-        normalize,
-    ]))
+    num_workers=4, pin_memory=True)
+
 test_loader = torch.utils.data.DataLoader(
     test_dataset, batch_size=test_batch_size, shuffle=False,
-    num_workers=4, pin_memory=False)
+    num_workers=4, pin_memory=True)
 
 # we should look into distributed sampler more carefully at torch.utils.data.distributed.DistributedSampler(train_dataset)
 log('training set size: {0}'.format(len(train_loader.dataset)))
@@ -118,6 +147,11 @@ joint_optimizer_specs = \
  {'params': ppnet.add_on_layers.parameters(), 'lr': joint_optimizer_lrs['add_on_layers'], 'weight_decay': 1e-3},
  {'params': ppnet.prototype_vectors, 'lr': joint_optimizer_lrs['prototype_vectors']},
 ]
+# Add occurrence_module if it exists
+if hasattr(ppnet, 'occurrence_module'):
+    joint_optimizer_specs.append(
+        {'params': ppnet.occurrence_module.parameters(), 'lr': joint_optimizer_lrs['occurrence_module'], 'weight_decay': 1e-3}
+    )
 joint_optimizer = torch.optim.Adam(joint_optimizer_specs)
 joint_lr_scheduler = torch.optim.lr_scheduler.StepLR(joint_optimizer, step_size=joint_lr_step_size, gamma=0.1)
 
@@ -126,6 +160,10 @@ warm_optimizer_specs = \
 [{'params': ppnet.add_on_layers.parameters(), 'lr': warm_optimizer_lrs['add_on_layers'], 'weight_decay': 1e-3},
  {'params': ppnet.prototype_vectors, 'lr': warm_optimizer_lrs['prototype_vectors']},
 ]
+if hasattr(ppnet, 'occurrence_module'):
+    warm_optimizer_specs.append(
+        {'params': ppnet.occurrence_module.parameters(), 'lr': warm_optimizer_lrs['occurrence_module'], 'weight_decay': 1e-3}
+    )
 warm_optimizer = torch.optim.Adam(warm_optimizer_specs)
 
 from settings import last_layer_optimizer_lr
@@ -157,7 +195,7 @@ for epoch in range(num_train_epochs):
     accu = tnt.test(model=ppnet_multi, dataloader=test_loader,
                     class_specific=class_specific, log=log)
     save.save_model_w_condition(model=ppnet, model_dir=model_dir, model_name=str(epoch) + 'nopush', accu=accu,
-                                target_accu=0.70, log=log)
+                                target_accu=0.50, log=log)  # Lower target for multi-label
 
     if epoch >= push_start and epoch in push_epochs:
         push.push_prototypes(
@@ -176,7 +214,7 @@ for epoch in range(num_train_epochs):
         accu = tnt.test(model=ppnet_multi, dataloader=test_loader,
                         class_specific=class_specific, log=log)
         save.save_model_w_condition(model=ppnet, model_dir=model_dir, model_name=str(epoch) + 'push', accu=accu,
-                                    target_accu=0.70, log=log)
+                                    target_accu=0.50, log=log)
 
         if prototype_activation_function != 'linear':
             tnt.last_only(model=ppnet_multi, log=log)

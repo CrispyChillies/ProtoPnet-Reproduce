@@ -5,6 +5,7 @@ import cv2
 import os
 import copy
 import time
+import torch.nn.functional as F
 
 from receptive_field import compute_rf_prototype
 from helpers import makedir, find_high_activation_crop
@@ -38,6 +39,9 @@ def push_prototypes(dataloader, # pytorch dataloader (must be unnormalized in [0
          prototype_shape[1],
          prototype_shape[2],
          prototype_shape[3]])
+    
+    # saves the occurrence maps for each prototype
+    global_occurrence_maps = {}
 
     '''
     proto_rf_boxes and proto_bound_boxes column:
@@ -85,6 +89,7 @@ def push_prototypes(dataloader, # pytorch dataloader (must be unnormalized in [0
                                    prototype_network_parallel,
                                    global_min_proto_dist,
                                    global_min_fmap_patches,
+                                   global_occurrence_maps,
                                    proto_rf_boxes,
                                    proto_bound_boxes,
                                    class_specific=class_specific,
@@ -117,6 +122,7 @@ def update_prototypes_on_batch(search_batch_input,
                                prototype_network_parallel,
                                global_min_proto_dist, # this will be updated
                                global_min_fmap_patches, # this will be updated
+                               global_occurrence_maps, # this will be updated
                                proto_rf_boxes, # this will be updated
                                proto_bound_boxes, # this will be updated
                                class_specific=True,
@@ -143,6 +149,13 @@ def update_prototypes_on_batch(search_batch_input,
         search_batch = search_batch.cuda()
         # this computation currently is not parallelized
         protoL_input_torch, proto_dist_torch = prototype_network_parallel.module.push_forward(search_batch)
+        
+        # Compute occurrence maps for visualization
+        if hasattr(prototype_network_parallel.module, 'occurrence_module'):
+            occurrence_maps = prototype_network_parallel.module.occurrence_module(protoL_input_torch)
+            occurrence_maps_np = occurrence_maps.detach().cpu().numpy()
+        else:
+            occurrence_maps_np = None
 
     protoL_input_ = np.copy(protoL_input_torch.detach().cpu().numpy())
     proto_dist_ = np.copy(proto_dist_torch.detach().cpu().numpy())
@@ -150,11 +163,15 @@ def update_prototypes_on_batch(search_batch_input,
     del protoL_input_torch, proto_dist_torch
 
     if class_specific:
+        # Multi-label: each image can have multiple classes
+        # class_to_img_index_dict maps class -> list of (img_index, has_class)
         class_to_img_index_dict = {key: [] for key in range(num_classes)}
-        # img_y is the image's integer label
+        # img_y is now a multi-label vector
         for img_index, img_y in enumerate(search_y):
-            img_label = img_y.item()
-            class_to_img_index_dict[img_label].append(img_index)
+            # img_y is a tensor of shape (num_classes,) with 0s and 1s
+            for class_idx in range(num_classes):
+                if img_y[class_idx].item() > 0.5:  # This image has this disease
+                    class_to_img_index_dict[class_idx].append(img_index)
 
     prototype_shape = prototype_network_parallel.module.prototype_shape
     n_prototypes = prototype_shape[0]
@@ -205,6 +222,15 @@ def update_prototypes_on_batch(search_batch_input,
             global_min_proto_dist[j] = batch_min_proto_dist_j
             global_min_fmap_patches[j] = batch_min_fmap_patch_j
             
+            # Save occurrence map for this prototype
+            if occurrence_maps_np is not None:
+                occurrence_map_j = occurrence_maps_np[img_index_in_batch, j, :, :]
+                global_occurrence_maps[j] = {
+                    'occurrence_map': occurrence_map_j,
+                    'image_index': img_index_in_batch + start_index_of_search_batch,
+                    'activation_location': (batch_argmin_proto_dist_j[1], batch_argmin_proto_dist_j[2])
+                }
+            
             # get the receptive field boundary of the image patch
             # that generates the representation
             protoL_rf_info = prototype_network_parallel.module.proto_layer_rf_info
@@ -239,7 +265,18 @@ def update_prototypes_on_batch(search_batch_input,
                 proto_act_img_j = prototype_activation_function_in_numpy(proto_dist_img_j)
             upsampled_act_img_j = cv2.resize(proto_act_img_j, dsize=(original_img_size, original_img_size),
                                              interpolation=cv2.INTER_CUBIC)
-            proto_bound_j = find_high_activation_crop(upsampled_act_img_j)
+            
+            # Use occurrence map for visualization if available
+            if occurrence_maps_np is not None:
+                occurrence_map_j = occurrence_maps_np[img_index_in_batch, j, :, :]
+                upsampled_occurrence_j = cv2.resize(occurrence_map_j, dsize=(original_img_size, original_img_size),
+                                                   interpolation=cv2.INTER_CUBIC)
+                # Combine activation and occurrence for better localization
+                combined_activation = upsampled_act_img_j * upsampled_occurrence_j
+                proto_bound_j = find_high_activation_crop(combined_activation)
+            else:
+                proto_bound_j = find_high_activation_crop(upsampled_act_img_j)
+            
             # crop out the image patch with high activation as prototype image
             proto_img_j = original_img_j[proto_bound_j[0]:proto_bound_j[1],
                                          proto_bound_j[2]:proto_bound_j[3], :]
@@ -251,7 +288,9 @@ def update_prototypes_on_batch(search_batch_input,
             proto_bound_boxes[j, 3] = proto_bound_j[2]
             proto_bound_boxes[j, 4] = proto_bound_j[3]
             if proto_bound_boxes.shape[1] == 6 and search_y is not None:
-                proto_bound_boxes[j, 5] = search_y[rf_prototype_j[0]].item()
+                # For multi-label, store the target class of this prototype
+                target_class = torch.argmax(prototype_network_parallel.module.prototype_class_identity[j]).item()
+                proto_bound_boxes[j, 5] = target_class
 
             if dir_for_saving_prototypes is not None:
                 if prototype_self_act_filename_prefix is not None:
@@ -278,6 +317,20 @@ def update_prototypes_on_batch(search_batch_input,
                                overlayed_original_img_j,
                                vmin=0.0,
                                vmax=1.0)
+                    
+                    # Save occurrence map overlay if available
+                    if occurrence_maps_np is not None:
+                        rescaled_occur_j = upsampled_occurrence_j - np.amin(upsampled_occurrence_j)
+                        rescaled_occur_j = rescaled_occur_j / (np.amax(rescaled_occur_j) + 1e-7)
+                        occur_heatmap = cv2.applyColorMap(np.uint8(255*rescaled_occur_j), cv2.COLORMAP_HOT)
+                        occur_heatmap = np.float32(occur_heatmap) / 255
+                        occur_heatmap = occur_heatmap[...,::-1]
+                        overlayed_with_occurrence = 0.5 * original_img_j + 0.3 * occur_heatmap
+                        plt.imsave(os.path.join(dir_for_saving_prototypes,
+                                                prototype_img_filename_prefix + '-original_with_occurrence' + str(j) + '.png'),
+                                   overlayed_with_occurrence,
+                                   vmin=0.0,
+                                   vmax=1.0)
                     
                     # if different from the original (whole) image, save the prototype receptive field as png
                     if rf_img_j.shape[0] != original_img_size or rf_img_j.shape[1] != original_img_size:
