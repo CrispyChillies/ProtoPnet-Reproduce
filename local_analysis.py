@@ -24,6 +24,28 @@ from preprocess import mean, std, preprocess_input_function, undo_preprocess_inp
 
 import argparse
 
+# Load dataset CSV for prototype source lookup
+import pandas as pd
+
+def load_prototype_source_info(proto_img_dir):
+    '''Load the .npy files containing prototype source information'''
+    if proto_img_dir is None or not os.path.exists(proto_img_dir):
+        return None, None
+    
+    # Look for bounding box files
+    proto_rf_boxes = None
+    proto_bound_boxes = None
+    
+    # Try to find the .npy files
+    for fname in os.listdir(proto_img_dir):
+        if fname.endswith('.npy'):
+            if 'receptive_field' in fname:
+                proto_rf_boxes = np.load(os.path.join(proto_img_dir, fname))
+            elif 'bb' in fname or 'bound' in fname:
+                proto_bound_boxes = np.load(os.path.join(proto_img_dir, fname))
+    
+    return proto_rf_boxes, proto_bound_boxes
+
 # Define NIH ChestXray disease labels (14 diseases)
 NIH_LABELS = [
     'Atelectasis', 'Cardiomegaly', 'Effusion', 'Infiltration', 'Mass', 'Nodule',
@@ -71,8 +93,13 @@ else:
             proto_img_dir = os.path.join(img_base_dir, latest_epoch)
             print(f'Auto-detected prototype image directory: {proto_img_dir}')
 
-# Load dataset CSV for prototype source lookup
-import pandas as pd
+
+# Save to /kaggle/working instead of read-only input directory
+save_analysis_path = os.path.join('/kaggle/working', 'xprotonet_analysis', image_name)
+makedir(save_analysis_path)
+
+log, logclose = create_logger(log_filename=os.path.join(save_analysis_path, 'local_analysis.log'))
+
 dataset_csv_path = args.dataset_csv[0]
 dataset_df = None
 if os.path.exists(dataset_csv_path):
@@ -83,11 +110,6 @@ else:
 
 dataset_root = args.dataset_root[0] if args.dataset_root else None
 
-# Save to /kaggle/working instead of read-only input directory
-save_analysis_path = os.path.join('/kaggle/working', 'xprotonet_analysis', image_name)
-makedir(save_analysis_path)
-
-log, logclose = create_logger(log_filename=os.path.join(save_analysis_path, 'local_analysis.log'))
 
 log('load model from ' + load_model_path)
 log('test image: ' + test_image_path)
@@ -124,11 +146,7 @@ normalize = transforms.Normalize(mean=mean,
                                  std=std)
 
 # Removed test accuracy check section for simplicity
-
-
 ##### SANITY CHECK
-# Note: For XProtoNet with NIH dataset, we don't have prototype image files
-# from training, so we skip the sanity check section
 log('Skipping prototype sanity checks (not applicable for current setup)')
 
 
@@ -162,25 +180,6 @@ def load_prototype_img(proto_img_dir, proto_idx):
             return plt.imread(proto_path)
     
     return None
-
-def load_prototype_source_info(proto_img_dir):
-    '''Load the .npy files containing prototype source information'''
-    if proto_img_dir is None or not os.path.exists(proto_img_dir):
-        return None, None
-    
-    # Look for bounding box files
-    proto_rf_boxes = None
-    proto_bound_boxes = None
-    
-    # Try to find the .npy files
-    for fname in os.listdir(proto_img_dir):
-        if fname.endswith('.npy'):
-            if 'receptive_field' in fname:
-                proto_rf_boxes = np.load(os.path.join(proto_img_dir, fname))
-            elif 'bb' in fname or 'bound' in fname:
-                proto_bound_boxes = np.load(os.path.join(proto_img_dir, fname))
-    
-    return proto_rf_boxes, proto_bound_boxes
 
 def get_prototype_source_info(proto_idx, proto_rf_boxes, proto_bound_boxes, dataset_df, train_dataset=None):
     '''Get information about the original source image for a prototype'''
