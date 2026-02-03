@@ -36,6 +36,7 @@ parser.add_argument('-gpuid', nargs=1, type=str, default='0')
 parser.add_argument('-model', nargs=1, type=str, required=True, help='Path to the .pth model file')
 parser.add_argument('-img', nargs=1, type=str, required=True, help='Path to the input X-ray image')
 parser.add_argument('-threshold', nargs=1, type=float, default=[0.5], help='Threshold for disease prediction (default: 0.5)')
+parser.add_argument('-proto_img_dir', nargs=1, type=str, default=None, help='Path to prototype images directory (auto-detected if not provided)')
 args = parser.parse_args()
 
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpuid[0]
@@ -49,6 +50,25 @@ load_model_path = args.model[0]
 model_name = os.path.basename(load_model_path)
 image_name = os.path.basename(test_image_path).split('.')[0]
 
+# Auto-detect prototype image directory
+if args.proto_img_dir is not None:
+    proto_img_dir = args.proto_img_dir[0]
+else:
+    # Try to auto-detect: look for img/epoch-X/ in the model directory
+    model_dir = os.path.dirname(load_model_path)
+    img_base_dir = os.path.join(model_dir, 'img')
+    proto_img_dir = None
+    
+    if os.path.exists(img_base_dir):
+        # Find the latest epoch directory
+        epoch_dirs = [d for d in os.listdir(img_base_dir) if d.startswith('epoch-')]
+        if epoch_dirs:
+            # Sort by epoch number
+            epoch_dirs.sort(key=lambda x: int(x.split('-')[1]))
+            latest_epoch = epoch_dirs[-1]
+            proto_img_dir = os.path.join(img_base_dir, latest_epoch)
+            print(f'Auto-detected prototype image directory: {proto_img_dir}')
+
 # Save to /kaggle/working instead of read-only input directory
 save_analysis_path = os.path.join('/kaggle/working', 'xprotonet_analysis', image_name)
 makedir(save_analysis_path)
@@ -58,6 +78,10 @@ log, logclose = create_logger(log_filename=os.path.join(save_analysis_path, 'loc
 log('load model from ' + load_model_path)
 log('test image: ' + test_image_path)
 log('prediction threshold: ' + str(prediction_threshold))
+if proto_img_dir and os.path.exists(proto_img_dir):
+    log('prototype images directory: ' + proto_img_dir)
+else:
+    log('prototype images directory: NOT FOUND (will skip prototype image comparisons)')
 
 ppnet = torch.load(load_model_path, weights_only=False)
 ppnet = ppnet.cuda()
@@ -98,6 +122,25 @@ def save_preprocessed_img(fname, preprocessed_imgs, index=0):
     
     plt.imsave(fname, undo_preprocessed_img)
     return undo_preprocessed_img
+
+def load_prototype_img(proto_img_dir, proto_idx):
+    '''Load the saved prototype image for a given prototype index'''
+    if proto_img_dir is None or not os.path.exists(proto_img_dir):
+        return None
+    
+    # Try different naming patterns
+    patterns = [
+        f'prototype-img-original{proto_idx}.png',
+        f'prototype-img{proto_idx}.png',
+        f'prototype{proto_idx}.png'
+    ]
+    
+    for pattern in patterns:
+        proto_path = os.path.join(proto_img_dir, pattern)
+        if os.path.exists(proto_path):
+            return plt.imread(proto_path)
+    
+    return None
 
 # load the test image and forward it through the network
 preprocess = transforms.Compose([
@@ -206,6 +249,7 @@ log('='*60 + '\n')
 ##### PROTOTYPE ACTIVATION PATTERNS (Additional Analysis)
 # Show which prototypes are most activated for this specific image
 makedir(os.path.join(save_analysis_path, 'prototype_activations'))
+makedir(os.path.join(save_analysis_path, 'prototype_comparisons'))
 
 log('='*60)
 log('TOP 10 MOST ACTIVATED PROTOTYPES')
@@ -239,11 +283,45 @@ for i in range(1, 11):
     heatmap = heatmap[...,::-1]
     overlayed_img = 0.5 * original_img + 0.3 * heatmap
     
-    # Save
+    # Save activation pattern
     disease_str = "_".join(disease_names[:2])  # Limit to 2 diseases for filename
     save_name = f'rank{i}_proto{proto_idx}_{disease_str}_act{activation_val:.2f}.png'
     plt.imsave(os.path.join(save_analysis_path, 'prototype_activations', save_name), overlayed_img)
     log(f'  Saved: {save_name}')
+    
+    # Load and save prototype image comparison
+    proto_img = load_prototype_img(proto_img_dir, proto_idx)
+    if proto_img is not None:
+        # Create side-by-side comparison
+        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        
+        # Prototype image (learned pattern)
+        axes[0].imshow(proto_img)
+        axes[0].set_title(f'Prototype {proto_idx}\n(Learned Pattern)', fontsize=10)
+        axes[0].axis('off')
+        
+        # Query image with activation overlay
+        axes[1].imshow(overlayed_img)
+        axes[1].set_title(f'Query Image\n(Activation: {activation_val:.2f})', fontsize=10)
+        axes[1].axis('off')
+        
+        # Just the heatmap
+        axes[2].imshow(rescaled_activation_pattern, cmap='jet')
+        axes[2].set_title('Activation Heatmap', fontsize=10)
+        axes[2].axis('off')
+        
+        plt.suptitle(f'Rank {i} - Prototype {proto_idx} - {disease_str}', fontsize=12, fontweight='bold')
+        plt.tight_layout()
+        
+        comparison_name = f'rank{i}_proto{proto_idx}_{disease_str}_comparison.png'
+        plt.savefig(os.path.join(save_analysis_path, 'prototype_comparisons', comparison_name), 
+                   bbox_inches='tight', dpi=150)
+        plt.close()
+        
+        log(f'  Saved comparison: {comparison_name}')
+    else:
+        log(f'  Prototype image not found for proto {proto_idx}')
+    
     log('--------------------------------------------------------------')
 
 log('='*60 + '\n')
@@ -257,7 +335,8 @@ log('Files generated:')
 log('  - original_img.png: Input image (preprocessed)')
 log('  - occurrence_maps/: XProtoNet disease localization heatmaps')
 log('  - prototype_activations/: Individual prototype activation patterns')
-
+if proto_img_dir and os.path.exists(proto_img_dir):
+    log('  - prototype_comparisons/: Side-by-side comparisons with learned prototypes')
 # Count positive predictions
 num_positive = np.sum(predictions)
 log(f'\nTotal diseases detected (>{prediction_threshold}): {num_positive}/{num_classes}')
