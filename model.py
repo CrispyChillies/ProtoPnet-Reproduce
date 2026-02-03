@@ -75,32 +75,19 @@ class PPNet(nn.Module):
         else:
             raise Exception('other base base_architecture NOT implemented')
 
-        if add_on_layers_type == 'bottleneck':
-            add_on_layers = []
-            current_in_channels = first_add_on_layer_in_channels
-            while (current_in_channels > self.prototype_shape[1]) or (len(add_on_layers) == 0):
-                current_out_channels = max(self.prototype_shape[1], (current_in_channels // 2))
-                add_on_layers.append(nn.Conv2d(in_channels=current_in_channels,
-                                               out_channels=current_out_channels,
-                                               kernel_size=1))
-                add_on_layers.append(nn.ReLU())
-                add_on_layers.append(nn.Conv2d(in_channels=current_out_channels,
-                                               out_channels=current_out_channels,
-                                               kernel_size=1))
-                if current_out_channels > self.prototype_shape[1]:
-                    add_on_layers.append(nn.ReLU())
-                else:
-                    assert(current_out_channels == self.prototype_shape[1])
-                    add_on_layers.append(nn.Sigmoid())
-                current_in_channels = current_in_channels // 2
-            self.add_on_layers = nn.Sequential(*add_on_layers)
-        else:
-            self.add_on_layers = nn.Sequential(
-                nn.Conv2d(in_channels=first_add_on_layer_in_channels, out_channels=self.prototype_shape[1], kernel_size=1),
-                nn.ReLU(),
-                nn.Conv2d(in_channels=self.prototype_shape[1], out_channels=self.prototype_shape[1], kernel_size=1),
-                nn.Sigmoid()
-                )
+        # XProtoNet: Simplified feature module with two 1x1 convolutions
+        # No sigmoid activation at the end
+        intermediate_channels = 128  # As per XProtoNet paper
+        self.add_on_layers = nn.Sequential(
+            nn.Conv2d(in_channels=first_add_on_layer_in_channels, 
+                     out_channels=intermediate_channels, 
+                     kernel_size=1),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=intermediate_channels, 
+                     out_channels=self.prototype_shape[1], 
+                     kernel_size=1)
+            # No sigmoid here - features can have any value
+        )
         
         self.prototype_vectors = nn.Parameter(torch.rand(self.prototype_shape),
                                               requires_grad=True)
@@ -113,12 +100,18 @@ class PPNet(nn.Module):
         self.last_layer = nn.Linear(self.num_prototypes, self.num_classes,
                                     bias=False) # do not use bias
 
-        # Occurrence module for weighted pooling
+        # XProtoNet: Occurrence module for spatial attention/weighting
+        # Takes feature maps and outputs per-prototype occurrence probabilities
+        occurrence_intermediate = 128  # As per XProtoNet paper
         self.occurrence_module = nn.Sequential(
-            nn.Conv2d(in_channels=self.prototype_shape[1], out_channels=self.prototype_shape[1], kernel_size=1),
+            nn.Conv2d(in_channels=self.prototype_shape[1], 
+                     out_channels=occurrence_intermediate, 
+                     kernel_size=1),
             nn.ReLU(),
-            nn.Conv2d(in_channels=self.prototype_shape[1], out_channels=self.num_prototypes, kernel_size=1),
-            nn.Sigmoid()  # Map values to [0, 1] for occurrence probability
+            nn.Conv2d(in_channels=occurrence_intermediate, 
+                     out_channels=self.num_prototypes, 
+                     kernel_size=1),
+            nn.Sigmoid()  # Additional sigmoid activation as per paper
         )
 
         if init_weights:
@@ -306,8 +299,17 @@ class PPNet(nn.Module):
             elif isinstance(m, nn.BatchNorm2d):
                 nn.init.constant_(m.weight, 1)
                 nn.init.constant_(m.bias, 0)
+        
+        # Initialize occurrence module weights
+        for m in self.occurrence_module.modules():
+            if isinstance(m, nn.Conv2d):
+                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
 
-        self.set_last_layer_incorrect_connection(incorrect_strength=-0.5)
+        # XProtoNet: Initialize classification layer weights to 1.0
+        # As per paper: "Weights... initially set to 1"
+        nn.init.constant_(self.last_layer.weight, 1.0)
 
 
 

@@ -15,7 +15,7 @@ import argparse
 import re
 
 from helpers import makedir
-from dataset import NIHDataset  # Import NIHDataset
+from dataset import NIHDataset  # Import NIHDatasetP
 import model
 import push
 import prune
@@ -64,8 +64,16 @@ train_indices, val_indices, test_indices = NIHDataset.create_train_test_split(
 normalize = transforms.Normalize(mean=mean, std=std)
 
 # Training transforms with augmentation
+# XProtoNet: Use RandomResizedCrop to maintain aspect ratio while adding scale augmentation
 train_transform = transforms.Compose([
-    transforms.Resize(size=(img_size, img_size)),
+    # RandomResizedCrop handles both resizing and cropping with scale augmentation
+    # scale=(0.75, 1.0) means crop between 75-100% of original image area
+    # ratio maintains chest X-ray aspect ratio (typically around 1.0 for square-ish crops)
+    transforms.RandomResizedCrop(
+        size=img_size, 
+        scale=(0.75, 1.0),  # Crop 75-100% of image area
+        ratio=(0.9, 1.1)    # Allow slight aspect ratio variation
+    ),
     transforms.RandomHorizontalFlip(p=0.5),
     transforms.RandomRotation(degrees=10),
     transforms.ColorJitter(brightness=0.2, contrast=0.2),
@@ -183,54 +191,136 @@ if ppnet.last_layer.bias is not None:
 
 # train the model
 log('start training')
+log('='*80)
+log('ITERATIVE TRAINING SCHEME (XProtoNet)')
+log('='*80)
+
 import copy
-for epoch in range(num_train_epochs):
-    log('epoch: \t{0}'.format(epoch))
 
-    if epoch < num_warm_epochs:
-        tnt.warm_only(model=ppnet_multi, log=log)
-        _ = tnt.train(model=ppnet_multi, dataloader=train_loader, optimizer=warm_optimizer,
-                      class_specific=class_specific, coefs=coefs, log=log)
-    else:
-        tnt.joint(model=ppnet_multi, log=log)
-        joint_lr_scheduler.step()
-        _ = tnt.train(model=ppnet_multi, dataloader=train_loader, optimizer=joint_optimizer,
-                      class_specific=class_specific, coefs=coefs, log=log)
+# ============================================================================
+# Phase 1: WARM-UP (5 epochs)
+# Train only: add_on_layers, occurrence_module, prototype_vectors
+# Freeze: features (backbone), last_layer
+# ============================================================================
+log('\n' + '='*80)
+log('PHASE 1: WARM-UP TRAINING')
+log('Training: add_on_layers + occurrence_module + prototypes')
+log('Frozen: backbone features + last_layer')
+log('='*80 + '\n')
 
+tnt.warm_only(model=ppnet_multi, log=log)
+for epoch in range(num_warm_epochs):
+    log('Warm-up epoch: \t{0}/{1}'.format(epoch, num_warm_epochs))
+    _ = tnt.train(model=ppnet_multi, dataloader=train_loader, optimizer=warm_optimizer,
+                  class_specific=class_specific, coefs=coefs, log=log)
+    accu = tnt.test(model=ppnet_multi, dataloader=test_loader,
+                    class_specific=class_specific, log=log)
+    save.save_model_w_condition(model=ppnet, model_dir=model_dir, model_name=str(epoch) + 'warmup', accu=accu,
+                                target_accu=0.30, log=log)
+
+# ============================================================================
+# Phase 2: ITERATIVE TRAINING
+# Cycle: Joint Training → Push → Last Layer Training → (Optional Pruning)
+# ============================================================================
+log('\n' + '='*80)
+log('PHASE 2: ITERATIVE JOINT TRAINING')
+log('Training: All layers (features + add_on + occurrence + prototypes + last_layer)')
+log('='*80 + '\n')
+
+# Switch to joint training mode (unfreeze backbone)
+tnt.joint(model=ppnet_multi, log=log)
+
+for epoch in range(num_warm_epochs, num_train_epochs):
+    log('\n' + '-'*80)
+    log('Epoch: \t{0}/{1}'.format(epoch, num_train_epochs))
+    log('-'*80)
+    
+    # ========================================================================
+    # Step 1: JOINT TRAINING
+    # Train all layers together
+    # ========================================================================
+    log('Step 1: Joint training (features + prototypes + last_layer)...')
+    joint_lr_scheduler.step()
+    _ = tnt.train(model=ppnet_multi, dataloader=train_loader, optimizer=joint_optimizer,
+                  class_specific=class_specific, coefs=coefs, log=log)
+    
     accu = tnt.test(model=ppnet_multi, dataloader=test_loader,
                     class_specific=class_specific, log=log)
     save.save_model_w_condition(model=ppnet, model_dir=model_dir, model_name=str(epoch) + 'nopush', accu=accu,
-                                target_accu=0.50, log=log)  # Lower target for multi-label
-
+                                target_accu=0.50, log=log)
+    
+    # ========================================================================
+    # Step 2: PUSH PROTOTYPES (on scheduled epochs)
+    # Replace prototype vectors with nearest training patches
+    # ========================================================================
     if epoch >= push_start and epoch in push_epochs:
+        log('\n' + '>'*60)
+        log('PUSH EPOCH: Replacing prototypes with nearest patches')
+        log('>'*60)
+        
         push.push_prototypes(
-            train_push_loader, # pytorch dataloader (must be unnormalized in [0,1])
-            prototype_network_parallel=ppnet_multi, # pytorch network with prototype_vectors
+            train_push_loader,
+            prototype_network_parallel=ppnet_multi,
             class_specific=class_specific,
-            preprocess_input_function=preprocess_input_function, # normalize if needed
+            preprocess_input_function=preprocess_input_function,
             prototype_layer_stride=1,
-            root_dir_for_saving_prototypes=img_dir, # if not None, prototypes will be saved here
-            epoch_number=epoch, # if not provided, prototypes saved previously will be overwritten
+            root_dir_for_saving_prototypes=img_dir,
+            epoch_number=epoch,
             prototype_img_filename_prefix=prototype_img_filename_prefix,
             prototype_self_act_filename_prefix=prototype_self_act_filename_prefix,
             proto_bound_boxes_filename_prefix=proto_bound_boxes_filename_prefix,
             save_prototype_class_identity=True,
             log=log)
+        
         accu = tnt.test(model=ppnet_multi, dataloader=test_loader,
                         class_specific=class_specific, log=log)
         save.save_model_w_condition(model=ppnet, model_dir=model_dir, model_name=str(epoch) + 'push', accu=accu,
                                     target_accu=0.50, log=log)
+        
+        # ====================================================================
+        # Step 3: LAST LAYER TRAINING
+        # Fine-tune classification weights after push
+        # Allow weights to diverge from initial value of 1.0
+        # ====================================================================
+        log('\n' + '>'*60)
+        log('LAST LAYER TRAINING: Fine-tuning classification weights')
+        log('>'*60)
+        
+        tnt.last_only(model=ppnet_multi, log=log)
+        for i in range(20):
+            log('Last layer iteration: \t{0}/20'.format(i))
+            _ = tnt.train(model=ppnet_multi, dataloader=train_loader, optimizer=last_layer_optimizer,
+                          class_specific=class_specific, coefs=coefs, log=log)
+            accu = tnt.test(model=ppnet_multi, dataloader=test_loader,
+                            class_specific=class_specific, log=log)
+            save.save_model_w_condition(model=ppnet, model_dir=model_dir, 
+                                       model_name=str(epoch) + '_' + str(i) + 'push', 
+                                       accu=accu, target_accu=0.50, log=log)
+        
+        # ====================================================================
+        # Step 4: PRUNING (Optional)
+        # Remove prototypes with negative weights in last_layer
+        # Uncomment to enable pruning
+        # ====================================================================
+        # log('\n' + '>'*60)
+        # log('PRUNING: Removing prototypes with negative weights')
+        # log('>'*60)
+        # prune.prune_prototypes(ppnet_multi, 
+        #                        prune_threshold=-0.5,
+        #                        preprocess_input_function=preprocess_input_function,
+        #                        log=log)
+        
+        # ====================================================================
+        # Return to joint training mode for next iteration
+        # ====================================================================
+        log('\n' + '>'*60)
+        log('Returning to joint training mode')
+        log('>'*60)
+        tnt.joint(model=ppnet_multi, log=log)
 
-        if prototype_activation_function != 'linear':
-            tnt.last_only(model=ppnet_multi, log=log)
-            for i in range(20):
-                log('iteration: \t{0}'.format(i))
-                _ = tnt.train(model=ppnet_multi, dataloader=train_loader, optimizer=last_layer_optimizer,
-                              class_specific=class_specific, coefs=coefs, log=log)
-                accu = tnt.test(model=ppnet_multi, dataloader=test_loader,
-                                class_specific=class_specific, log=log)
-                save.save_model_w_condition(model=ppnet, model_dir=model_dir, model_name=str(epoch) + '_' + str(i) + 'push', accu=accu,
-                                            target_accu=0.2, log=log)
+log('\n' + '='*80)
+log('TRAINING COMPLETE')
+log('='*80)
    
 logclose()
 
