@@ -37,6 +37,8 @@ parser.add_argument('-model', nargs=1, type=str, required=True, help='Path to th
 parser.add_argument('-img', nargs=1, type=str, required=True, help='Path to the input X-ray image')
 parser.add_argument('-threshold', nargs=1, type=float, default=[0.5], help='Threshold for disease prediction (default: 0.5)')
 parser.add_argument('-proto_img_dir', nargs=1, type=str, default=None, help='Path to prototype images directory (auto-detected if not provided)')
+parser.add_argument('-dataset_csv', nargs=1, type=str, default=['data/Data_Entry_2017.csv'], help='Path to dataset CSV file with image labels')
+parser.add_argument('-dataset_root', nargs=1, type=str, default=None, help='Root directory of dataset images')
 args = parser.parse_args()
 
 os.environ['CUDA_VISIBLE_DEVICES'] = args.gpuid[0]
@@ -69,6 +71,18 @@ else:
             proto_img_dir = os.path.join(img_base_dir, latest_epoch)
             print(f'Auto-detected prototype image directory: {proto_img_dir}')
 
+# Load dataset CSV for prototype source lookup
+import pandas as pd
+dataset_csv_path = args.dataset_csv[0]
+dataset_df = None
+if os.path.exists(dataset_csv_path):
+    dataset_df = pd.read_csv(dataset_csv_path)
+    log(f'Loaded dataset CSV: {dataset_csv_path} ({len(dataset_df)} entries)')
+else:
+    log(f'Warning: Dataset CSV not found at {dataset_csv_path}')
+
+dataset_root = args.dataset_root[0] if args.dataset_root else None
+
 # Save to /kaggle/working instead of read-only input directory
 save_analysis_path = os.path.join('/kaggle/working', 'xprotonet_analysis', image_name)
 makedir(save_analysis_path)
@@ -82,6 +96,13 @@ if proto_img_dir and os.path.exists(proto_img_dir):
     log('prototype images directory: ' + proto_img_dir)
 else:
     log('prototype images directory: NOT FOUND (will skip prototype image comparisons)')
+
+# Load prototype source information
+proto_rf_boxes, proto_bound_boxes = load_prototype_source_info(proto_img_dir)
+if proto_rf_boxes is not None:
+    log(f'Loaded prototype source info: {len(proto_rf_boxes)} prototypes')
+else:
+    log('Warning: Prototype source .npy files not found')
 
 ppnet = torch.load(load_model_path, weights_only=False)
 ppnet = ppnet.cuda()
@@ -141,6 +162,59 @@ def load_prototype_img(proto_img_dir, proto_idx):
             return plt.imread(proto_path)
     
     return None
+
+def load_prototype_source_info(proto_img_dir):
+    '''Load the .npy files containing prototype source information'''
+    if proto_img_dir is None or not os.path.exists(proto_img_dir):
+        return None, None
+    
+    # Look for bounding box files
+    proto_rf_boxes = None
+    proto_bound_boxes = None
+    
+    # Try to find the .npy files
+    for fname in os.listdir(proto_img_dir):
+        if fname.endswith('.npy'):
+            if 'receptive_field' in fname:
+                proto_rf_boxes = np.load(os.path.join(proto_img_dir, fname))
+            elif 'bb' in fname or 'bound' in fname:
+                proto_bound_boxes = np.load(os.path.join(proto_img_dir, fname))
+    
+    return proto_rf_boxes, proto_bound_boxes
+
+def get_prototype_source_info(proto_idx, proto_rf_boxes, proto_bound_boxes, dataset_df, train_dataset=None):
+    '''Get information about the original source image for a prototype'''
+    info = {}
+    
+    if proto_rf_boxes is not None and proto_idx < len(proto_rf_boxes):
+        img_idx = int(proto_rf_boxes[proto_idx, 0])
+        info['dataset_index'] = img_idx
+        info['rf_box'] = proto_rf_boxes[proto_idx, 1:5].astype(int)
+        
+        if proto_rf_boxes.shape[1] >= 6:
+            info['class_id'] = int(proto_rf_boxes[proto_idx, 5])
+    
+    if proto_bound_boxes is not None and proto_idx < len(proto_bound_boxes):
+        info['bound_box'] = proto_bound_boxes[proto_idx, 1:5].astype(int)
+    
+    # Look up in dataset
+    if dataset_df is not None and 'dataset_index' in info:
+        img_idx = info['dataset_index']
+        if img_idx < len(dataset_df):
+            row = dataset_df.iloc[img_idx]
+            info['image_name'] = row['Image Index'] if 'Image Index' in row else None
+            info['labels'] = row['Finding Labels'] if 'Finding Labels' in row else None
+    
+    # Try to get from train_dataset if available
+    if train_dataset is not None and 'dataset_index' in info:
+        try:
+            img_idx = info['dataset_index']
+            if hasattr(train_dataset, 'samples'):
+                info['image_path'] = train_dataset.samples[img_idx][0]
+        except:
+            pass
+    
+    return info if info else None
 
 # load the test image and forward it through the network
 preprocess = transforms.Compose([
@@ -268,6 +342,16 @@ for i in range(1, 11):
     log(f'  Activation: {activation_val:.4f}')
     log(f'  Associated diseases: {", ".join(disease_names)}')
     
+    # Get source information
+    source_info = get_prototype_source_info(proto_idx, proto_rf_boxes, proto_bound_boxes, dataset_df)
+    if source_info:
+        if 'image_name' in source_info:
+            log(f'  Source image: {source_info["image_name"]}')
+        if 'labels' in source_info:
+            log(f'  Source labels: {source_info["labels"]}')
+        if 'dataset_index' in source_info:
+            log(f'  Dataset index: {source_info["dataset_index"]}')
+    
     # Visualize activation pattern
     activation_pattern = prototype_activation_patterns[idx][proto_idx].detach().cpu().numpy()
     upsampled_activation_pattern = cv2.resize(activation_pattern, dsize=(img_size, img_size),
@@ -297,7 +381,10 @@ for i in range(1, 11):
         
         # Prototype image (learned pattern)
         axes[0].imshow(proto_img)
-        axes[0].set_title(f'Prototype {proto_idx}\n(Learned Pattern)', fontsize=10)
+        title_text = f'Prototype {proto_idx}\n(Learned Pattern)'
+        if source_info and 'image_name' in source_info:
+            title_text += f'\nFrom: {source_info["image_name"][:20]}...'
+        axes[0].set_title(title_text, fontsize=9)
         axes[0].axis('off')
         
         # Query image with activation overlay
